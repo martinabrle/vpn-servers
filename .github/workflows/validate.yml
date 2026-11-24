@@ -1,0 +1,29 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Compile Bicep
+        run: az bicep build --file templates/main.bicep --outfile "$RUNNER_TEMP/vpn.json"
+      - name: Lint shell scripts
+        run: shellcheck -x scripts/*.sh tests/*.sh
+      - name: Exercise certificates, profiles, and recovery
+        run: |
+          bash tests/bootstrap.sh
+          bash tests/deploy.sh
+          AZURE_LOCATION=westeurope bash tests/deploy.sh
+          bash tests/vault.sh
+      - name: Validate Linux VPN configurations
+        run: docker build --file tests/Dockerfile --tag vpn-validation . && docker run --rm --cap-add NET_ADMIN vpn-validation
+      - name: Exercise 20 shared-profile devices behind NAT
+        run: bash tests/shared-profile.sh

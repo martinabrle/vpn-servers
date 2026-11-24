@@ -1,0 +1,7 @@
+**
+!scripts
+!scripts/bootstrap.sh
+!tests
+!tests/linux.sh
+!tests/shared-client.sh
+!tests/Dockerfile
