@@ -25,7 +25,7 @@ jq --arg size "$VM_SIZE" '
   def capabilities: [.capabilities[]? | {key: .name, value: .value}] | from_entries;
   [.[] | select((.restrictions | length) == 0) |
     if $size != "" then select(.name == $size)
-    else select(capabilities |
+    else select(.name | startswith("Standard_B")) | select(capabilities |
       .CpuArchitectureType == "x64" and
       .vCPUs == "2" and (.vCPUsAvailable // .vCPUs) == "2" and
       (.MemoryGB | tonumber? >= 1) and
@@ -33,8 +33,14 @@ jq --arg size "$VM_SIZE" '
       ((.TrustedLaunchDisabled // "false") | ascii_downcase) != "true")
     end | .name]
 ' "$WORK/skus.json" > "$WORK/candidates.json"
-jq -e 'length > 0' "$WORK/candidates.json" > /dev/null ||
-  { echo 'VM size is unavailable or restricted in this region. Set VPN_VM_SIZE to an available SKU.' >&2; exit 1; }
+jq -e 'length > 0' "$WORK/candidates.json" > /dev/null || {
+  if [[ -z $VM_SIZE ]]; then
+    echo 'No eligible 2-vCPU B-series VM is available in this region. Set VPN_VM_SIZE to select a SKU explicitly.' >&2
+  else
+    echo 'VM size is unavailable or restricted in this region. Set VPN_VM_SIZE to an available SKU.' >&2
+  fi
+  exit 1
+}
 
 retail_prices() {
   local url filter sku_filter attempt status result delay wait started retry_after retry_time now
@@ -127,8 +133,12 @@ if quote=$(retail_prices | jq -ers --slurpfile candidates "$WORK/candidates.json
 '); then
   IFS=$'\t' read -r VM_SIZE hourly monthly <<< "$quote"
   LC_NUMERIC=C printf -v COMPUTE_COST 'USD %s/hour (~USD %.2f/month at 730 hours; compute only)' "$hourly" "$monthly"
+elif [[ -z $VM_SIZE ]] && jq -e 'index("Standard_B2ats_v2") != null' "$WORK/candidates.json" > /dev/null; then
+  VM_SIZE=Standard_B2ats_v2
+  echo "Warning: Could not price eligible 2-vCPU B-series VMs in $AZURE_LOCATION; defaulting to $VM_SIZE without a cost estimate." >&2
+  COMPUTE_COST='Unavailable (Azure Retail Prices)'
 elif [[ -z $VM_SIZE ]]; then
-  echo 'Could not price an eligible 2-vCPU VM from Azure Retail Prices. Set VPN_VM_SIZE to select a SKU explicitly.' >&2
+  echo 'Could not price an eligible 2-vCPU B-series VM, and the Standard_B2ats_v2 fallback is not eligible in this region. Set VPN_VM_SIZE to select a SKU explicitly.' >&2
   exit 1
 else
   echo "Warning: Azure Retail Prices estimate unavailable for $VM_SIZE in $AZURE_LOCATION." >&2

@@ -16,8 +16,8 @@ param sshKey {
 @description('Object ID of the GitHub OIDC service principal. Granted secret access only in this regional vault.')
 param automationObjectId string
 
-@description('Low-cost default. Override if unavailable in the selected region or more throughput is needed.')
-param vmSize string = 'Standard_B1s'
+@description('Low-cost 2-vCPU burstable default. Override if unavailable in the selected region or more throughput is needed.')
+param vmSize string = 'Standard_B2ats_v2'
 
 resource regionalGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: 'vpn_${location}_rg'
