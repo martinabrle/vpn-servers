@@ -12,6 +12,10 @@ unset VPN_VM_SIZE VM_SIZE
 export EXPECTED_VM_SIZE=Standard_B2ats_v2
 export EXISTING=false
 export RESTRICTED=false
+export B2ATS_UNAVAILABLE=false
+export B2TS_AVAILABLE=false
+export CHEAPER_D=false
+export MISSING_B_PRICES=false
 export NO_PRICES=false
 export PAGE_FAILURE=false
 export MANY_SKUS=false
@@ -37,7 +41,8 @@ az() {
       if [[ $RESTRICTED == true ]]; then
         printf '[]\n'
       else
-        jq -n --argjson many "$MANY_SKUS" '
+        jq -n --argjson many "$MANY_SKUS" --argjson ats_unavailable "$B2ATS_UNAVAILABLE" \
+          --argjson ts_available "$B2TS_AVAILABLE" '
           def sku($name; $cores; $memory; $arch; $gen; $disabled; $restrictions): {
             name: $name, restrictions: $restrictions,
             capabilities: ({vCPUs: $cores, CpuArchitectureType: $arch, MemoryGB: $memory,
@@ -45,16 +50,18 @@ az() {
               map({name: .key, value: .value}))
           };
           [sku("Standard_B1s"; "1"; "1"; "x64"; "V1,V2"; "False"; []),
-           sku("Standard_B2ats_v2"; "2"; "1"; "x64"; "V2"; "False"; []),
+           sku("Standard_B2ats_v2"; "2"; "1"; "x64"; "V2"; "False";
+             if $ats_unavailable then [{type:"Location",reasonCode:"NotAvailableForSubscription"}] else [] end),
            sku("Standard_D2s_v5"; "2"; "8"; "x64"; "V1,V2"; "False"; []),
            sku("Standard_B2pts_v2"; "2"; "1"; "Arm64"; "V2"; "False"; []),
-           sku("Standard_A2_v2"; "2"; "4"; "x64"; "V1"; "False"; []),
-           sku("Standard_F2"; "2"; "4"; "x64"; "V2"; "True"; []),
-           sku("Standard_B2ts_v2"; "2"; "1"; "x64"; "V2"; "False"; [{type:"Location"}]),
-           sku("Standard_TestLowMemory"; "2"; "0.5"; "x64"; "V2"; "False"; [])] +
+           sku("Standard_B2gen1"; "2"; "4"; "x64"; "V1"; "False"; []),
+           sku("Standard_B2disabled"; "2"; "4"; "x64"; "V2"; "True"; []),
+           sku("Standard_B2ts_v2"; "2"; "1"; "x64"; "V2"; "False";
+             if $ts_available then [] else [{type:"Location",reasonCode:"NotAvailableForSubscription"}] end),
+           sku("Standard_B2lowmemory"; "2"; "0.5"; "x64"; "V2"; "False"; [])] +
           if $many then
-            [range(1; 41) | sku("Standard_Test2_\(.)"; "2"; "1"; "x64"; "V2"; "False"; [])] +
-            [sku("Standard_TestCheapest"; "2"; "1"; "x64"; "V2"; "False"; [])]
+            [range(1; 41) | sku("Standard_B2test_\(.)"; "2"; "1"; "x64"; "V2"; "False"; [])] +
+            [sku("Standard_B2testCheapest"; "2"; "1"; "x64"; "V2"; "False"; [])]
           else [] end
         '
       fi
@@ -140,6 +147,10 @@ curl() {
       echo 'Azure Retail Prices page unavailable after retries (HTTP 429).' >&2
       return 22
     fi
+    if [[ $MISSING_B_PRICES == true ]]; then
+      printf '{"Items":[],"NextPageLink":null}\n' > "$output"
+      return
+    fi
     jq -n --arg region "$AZURE_LOCATION" '{Items: [{
       armSkuName:"Standard_B2ats_v2", armRegionName:$region, retailPrice:0.023,
       productName:"Virtual Machines Basv2 Series", skuName:"B2ats v2", meterName:"B2ats v2",
@@ -160,7 +171,7 @@ curl() {
       return 22
     fi
     if [[ $BATCH_FAILURE == true ]] &&
-      jq -e 'index("Standard_TestCheapest") != null' <<< "$names" > /dev/null; then
+      jq -e 'index("Standard_B2testCheapest") != null' <<< "$names" > /dev/null; then
       echo 'Last pricing batch unavailable (HTTP 404).' >&2
       printf '404'
       return 22
@@ -169,7 +180,7 @@ curl() {
     jq -n --argjson names "$names" --arg region "$AZURE_LOCATION" '
       {Items: [$names[] | . as $size | {
         armSkuName:$size, armRegionName:$region,
-        retailPrice:(if $size == "Standard_TestCheapest" then 0.02
+        retailPrice:(if $size == "Standard_B2testCheapest" then 0.02
           elif $size == "Standard_B2ats_v2" then 0.023 else 0.1 end),
         productName:"Virtual Machines Example Series", skuName:$size, meterName:$size,
         type:"Consumption", unitOfMeasure:"1 Hour", currencyCode:"USD", isPrimaryMeterRegion:true
@@ -180,8 +191,12 @@ curl() {
   local size=${VPN_VM_SIZE:-${VM_SIZE:-}} expected_filter
   if [[ -n $size ]]; then
     expected_filter="and (armSkuName eq '$size')"
+  elif [[ $B2ATS_UNAVAILABLE == true ]]; then
+    expected_filter="and (armSkuName eq 'Standard_B2ts_v2')"
+  elif [[ $B2TS_AVAILABLE == true ]]; then
+    expected_filter="and (armSkuName eq 'Standard_B2ats_v2' or armSkuName eq 'Standard_B2ts_v2')"
   else
-    expected_filter="and (armSkuName eq 'Standard_B2ats_v2' or armSkuName eq 'Standard_D2s_v5')"
+    expected_filter="and (armSkuName eq 'Standard_B2ats_v2')"
   fi
   [[ $* == *"$expected_filter"* ]] ||
     { echo 'Pricing request must include only eligible SKUs.' >&2; return 1; }
@@ -190,21 +205,21 @@ curl() {
     return
   fi
   if [[ $NO_PRICES == true ]]; then printf '{"Items":[],"NextPageLink":null}\n' > "$output"; return; fi
-  jq -n --arg region "$AZURE_LOCATION" '
+  jq -n --arg region "$AZURE_LOCATION" --argjson cheaper_d "$CHEAPER_D" '
     def price($size; $rate): {
       armSkuName:$size, armRegionName:$region, retailPrice:$rate,
       productName:"Virtual Machines Example Series", skuName:$size, meterName:$size,
       type:"Consumption", unitOfMeasure:"1 Hour", currencyCode:"USD", isPrimaryMeterRegion:true
     };
     {Items: [
-      price("Standard_D2s_v5"; 0.1),
+      price("Standard_D2s_v5"; if $cheaper_d then 0.01 else 0.1 end),
       (price("Standard_D2s_v5"; 0.001) | .meterName += " Spot"),
       (price("Standard_D2s_v5"; 0.002) | .skuName += " Low Priority"),
       (price("Standard_D2s_v5"; 0.003) | .productName += " Windows"),
       (price("Standard_D2s_v5"; 0.004) | .type = "Reservation"),
       price("Standard_B1s"; 0.012), price("Standard_B2pts_v2"; 0.009),
-      price("Standard_A2_v2"; 0.008), price("Standard_F2"; 0.007), price("Standard_B2ts_v2"; 0.006),
-      price("Standard_TestLowMemory"; 0.005)
+      price("Standard_B2gen1"; 0.008), price("Standard_B2disabled"; 0.007), price("Standard_B2ts_v2"; 0.006),
+      price("Standard_B2lowmemory"; 0.005)
     ], NextPageLink:"https://prices.azure.com:443/api/retail/prices?$skip=1000"}
   ' > "$output"
 }
@@ -238,6 +253,17 @@ if grep -Eq 'BEGIN OPENSSH PRIVATE KEY|vpn-test-vault|vpn-test\.[a-z]+\.cloudapp
   echo 'Private key, hostname, or vault name leaked to deployment output.' >&2
   exit 1
 fi
+CHEAPER_D=true bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/cheaper-d.log" 2>&1
+grep -Fq 'Standard_B2ats_v2. Estimated cost: USD 0.023/hour' "$TEST_DIR/cheaper-d.log"
+B2TS_AVAILABLE=true EXPECTED_VM_SIZE=Standard_B2ts_v2 \
+  bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/b2ts.log" 2>&1
+grep -Fq 'Standard_B2ts_v2. Estimated cost: USD 0.006/hour' "$TEST_DIR/b2ts.log"
+B2ATS_UNAVAILABLE=true B2TS_AVAILABLE=true EXPECTED_VM_SIZE=Standard_B2ts_v2 \
+  bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/alternative.log" 2>&1
+grep -Fq 'Standard_B2ts_v2. Estimated cost: USD 0.006/hour' "$TEST_DIR/alternative.log"
+VPN_VM_SIZE=Standard_D2s_v5 EXPECTED_VM_SIZE=Standard_D2s_v5 \
+  bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/explicit-d.log" 2>&1
+grep -Fq 'Standard_D2s_v5. Estimated cost: USD 0.1/hour' "$TEST_DIR/explicit-d.log"
 if EXISTING=lookup-error bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log" 2>&1; then
   echo 'A failed resource group lookup must stop deployment.' >&2
   exit 1
@@ -253,16 +279,22 @@ if VPN_VM_SIZE=Standard_B1s RESTRICTED=true bash "$ROOT/scripts/deploy.sh" > "$T
   exit 1
 fi
 grep -q 'VM size is unavailable or restricted' "$TEST_DIR/error.log"
-if NO_PRICES=true bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log" 2>&1; then
-  echo 'Automatic selection must fail when pricing is unavailable.' >&2
+if B2ATS_UNAVAILABLE=true bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log" 2>&1; then
+  echo 'Automatic selection must fail when B-series SKUs are restricted, even if D-series is available.' >&2
   exit 1
 fi
-grep -q 'Could not price an eligible 2-vCPU VM' "$TEST_DIR/error.log"
-if PAGE_FAILURE=true bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log" 2>&1; then
-  echo 'Automatic selection must fail rather than use an incomplete price list.' >&2
+grep -q 'No eligible 2-vCPU B-series VM is available' "$TEST_DIR/error.log"
+if B2ATS_UNAVAILABLE=true B2TS_AVAILABLE=true NO_PRICES=true \
+  bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log" 2>&1; then
+  echo 'An unpriced B-series VM must not trigger a restricted B2ats_v2 fallback.' >&2
   exit 1
 fi
-grep -q 'Could not price an eligible 2-vCPU VM' "$TEST_DIR/error.log"
+grep -q 'Could not price an eligible 2-vCPU B-series VM' "$TEST_DIR/error.log"
+for scenario in NO_PRICES MISSING_B_PRICES PAGE_FAILURE; do
+  env "$scenario=true" bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/$scenario.log" 2>&1
+  grep -Fq 'defaulting to Standard_B2ats_v2 without a cost estimate' "$TEST_DIR/$scenario.log"
+  grep -Fq 'Standard_B2ats_v2. Estimated cost: Unavailable (Azure Retail Prices)' "$TEST_DIR/$scenario.log"
+done
 NO_PRICES=true VM_SIZE=Standard_B1s EXPECTED_VM_SIZE=Standard_B1s \
   bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/explicit.log" 2>&1
 grep -Fq 'Warning: Azure Retail Prices estimate unavailable for Standard_B1s' "$TEST_DIR/explicit.log"
@@ -271,16 +303,14 @@ if EXTENSION_FAILURE=true bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log"
   exit 1
 fi
 grep -q 'VM extensions did not both report successful provisioning' "$TEST_DIR/error.log"
-MANY_SKUS=true EXPECTED_VM_SIZE=Standard_TestCheapest \
+MANY_SKUS=true EXPECTED_VM_SIZE=Standard_B2testCheapest \
   bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/batches.log"
-grep -Fq 'Standard_TestCheapest. Estimated cost: USD 0.02/hour (~USD 14.60/month' "$TEST_DIR/batches.log"
-jq -se 'length == 5 and ([.[][]] | length) == 43 and ([.[][]] | unique | length) == 43' \
+grep -Fq 'Standard_B2testCheapest. Estimated cost: USD 0.02/hour (~USD 14.60/month' "$TEST_DIR/batches.log"
+jq -se 'length == 5 and ([.[][]] | length) == 42 and ([.[][]] | unique | length) == 42' \
   "$TEST_DIR/price-batches" > /dev/null
-if MANY_SKUS=true BATCH_FAILURE=true bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log" 2>&1; then
-  echo 'Automatic selection must fail when any pricing batch is unavailable.' >&2
-  exit 1
-fi
-grep -q 'Could not price an eligible 2-vCPU VM' "$TEST_DIR/error.log"
+MANY_SKUS=true BATCH_FAILURE=true bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/batch-failure.log" 2>&1
+grep -Fq 'defaulting to Standard_B2ats_v2 without a cost estimate' "$TEST_DIR/batch-failure.log"
+grep -Fq 'Standard_B2ats_v2. Estimated cost: Unavailable (Azure Retail Prices)' "$TEST_DIR/batch-failure.log"
 
 "${PYTHON:-python3}" - "$TEST_DIR" <<'PY' &
 import json
@@ -361,16 +391,13 @@ for scenario in throttled retry-limit partial retry-after retry-date; do
     bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/$scenario.log" 2>&1
   grep -Fq 'Standard_B2ats_v2. Estimated cost: USD 0.023/hour' "$TEST_DIR/$scenario.log"
 done
-if RETAIL_HTTP_URL="$retail_url/exhausted" bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log" 2>&1; then
-  echo 'Pricing must stop after nine retries rather than attempt an eleventh request.' >&2
-  exit 1
-fi
-grep -q 'Could not price an eligible 2-vCPU VM' "$TEST_DIR/error.log"
-if RETAIL_HTTP_URL="$retail_url/retry-budget" bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/error.log" 2>&1; then
-  echo 'Pricing must stop when Retry-After exceeds the retry budget.' >&2
-  exit 1
-fi
-grep -q 'Azure Retail Prices retry budget exhausted' "$TEST_DIR/error.log"
+RETAIL_HTTP_URL="$retail_url/exhausted" bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/exhausted.log" 2>&1
+grep -Fq 'defaulting to Standard_B2ats_v2 without a cost estimate' "$TEST_DIR/exhausted.log"
+grep -Fq 'Standard_B2ats_v2. Estimated cost: Unavailable (Azure Retail Prices)' "$TEST_DIR/exhausted.log"
+RETAIL_HTTP_URL="$retail_url/retry-budget" bash "$ROOT/scripts/deploy.sh" > "$TEST_DIR/retry-budget.log" 2>&1
+grep -q 'Azure Retail Prices retry budget exhausted' "$TEST_DIR/retry-budget.log"
+grep -Fq 'defaulting to Standard_B2ats_v2 without a cost estimate' "$TEST_DIR/retry-budget.log"
+grep -Fq 'Standard_B2ats_v2. Estimated cost: Unavailable (Azure Retail Prices)' "$TEST_DIR/retry-budget.log"
 command curl --noproxy '*' --fail --silent --show-error --max-time 5 "$retail_url/stop" > /dev/null
 wait "$RETAIL_PID"
 RETAIL_PID=
@@ -379,4 +406,4 @@ jq -e '.throttled == 4 and .["retry-limit"] == 10 and .exhausted == 10 and .part
   .delays.throttled[1] > .delays.throttled[0] and .delays.throttled[2] > .delays.throttled[1] and
   .delays["retry-after"][0] >= 2 and .delays["retry-date"][0] >= 2' "$TEST_DIR/price-requests.json" > /dev/null ||
   { cat "$TEST_DIR/price-requests.json" >&2; echo 'Pricing retry counts or exponential backoff were incorrect.' >&2; exit 1; }
-printf 'Regional deployment, bounded pricing batches and global minimum, exponential backoff, nine-retry success and exhaustion, Retry-After and retry budgets, partial-download retries, explicit override, pricing failures, stable recovery SSH keys, secure parameter cleanup, and extension health passed (mock Azure CLI and local Retail Prices API).\n'
+printf 'Regional deployment, B-series ranking and eligibility-checked fallback, bounded pricing batches and global minimum, exponential backoff, nine-retry success and exhaustion, Retry-After and retry budgets, partial-download retries, explicit overrides, stable recovery SSH keys, secure parameter cleanup, and extension health passed (mock Azure CLI and local Retail Prices API).\n'

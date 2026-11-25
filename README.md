@@ -4,7 +4,7 @@ A small, independent VPN appliance in each Azure region you select:
 
 - **WireGuard**, with **20 separate ready-to-import client configurations**.
 - **IKEv2/IPsec using strongSwan**, with mutual RSA certificate authentication and one shared profile for up to **20 simultaneously connected devices**. An Apple configuration profile supports native iPhone/iPad/macOS VPN clients; no VPN app, shared VPN password, PPTP, or L2TP is needed.
-- Ubuntu Server **24.04 LTS**, the lowest-priced compatible **2-vCPU VM** in the deployment region by default, a 32 GiB Standard HDD OS disk, and one static Standard IPv4 address.
+- Ubuntu Server **24.04 LTS**, the lowest-priced compatible **2-vCPU B-series VM** in the deployment region by default (with an eligible `Standard_B2ats_v2` fallback if pricing is unavailable), a 32 GiB Standard HDD OS disk, and one static Standard IPv4 address.
 - Microsoft Entra SSH login with VM Administrator Login RBAC; **SSH is not exposed to the Internet**.
 - Regional Key Vault for recovery keys, VPN certificates, and client profiles.
 - GitHub Actions OIDC deployment. **Region is the only workflow input.**
@@ -84,7 +84,7 @@ Set these **GitHub Actions secrets**, preferably in the `azure` environment. Rep
 | `AZURE_TENANT_ID` | `$TENANT_ID` |
 | `AZURE_SUBSCRIPTION_ID` | `$SUBSCRIPTION_ID` |
 | `VPN_ADMIN_OBJECT_ID` | Entra **object ID** of the user or group administering the VM |
-| `VPN_VM_SIZE` | Optional; empty selects the cheapest compatible 2-vCPU SKU using live Azure retail prices |
+| `VPN_VM_SIZE` | Optional; empty selects the cheapest compatible 2-vCPU B-series SKU using live Azure retail prices, or an eligible `Standard_B2ats_v2` if pricing is unavailable |
 
 Use the principal's **object ID**, not a client/application ID or email, for the VPN administrator. A group is useful for multiple administrators. No long-lived Azure client secret is needed.
 
@@ -106,11 +106,11 @@ The workflow:
 
 The workflow suppresses default Azure CLI output. Azure errors remain visible and may include resource details. For full ARM diagnostics, see **Subscriptions → your subscription → Deployments → `vpn-<region>`** in the Azure portal.
 
-Automatic selection compares Linux pay-as-you-go rates (not Spot or reservations) for unrestricted **x64 Gen2 Trusted Launch-compatible** SKUs with exactly 2 vCPUs and at least 1 GiB of RAM. Pricing requests include only eligible SKUs, in batches of at most 10 to stay within API query-complexity and URL limits. All batches and pages are compared before selecting the cheapest rate. Transient failures, including HTTP 429 throttling, are retried up to nine times within a 15-minute retry budget per page. Backoff starts at one second and doubles after each retry; a longer `Retry-After` delay (seconds or an HTTP date) is honored as a minimum wait. The estimate is in USD per hour and per 730-hour month for VM compute only; it excludes disk, IP, vault, and network charges. If no eligible SKU can be priced or any pricing batch or page remains unavailable, automatic selection stops. With an explicit SKU, an unavailable estimate produces a warning instead.
+Automatic selection compares Linux pay-as-you-go rates (not Spot or reservations) for unrestricted **x64 Gen2 Trusted Launch-compatible B-series** SKUs with exactly 2 vCPUs and at least 1 GiB of RAM. Pricing requests include only eligible SKUs, in batches of at most 10 to stay within API query-complexity and URL limits. All batches and pages are compared before selecting the cheapest B-series rate. Transient failures, including HTTP 429 throttling, are retried up to nine times within a 15-minute retry budget per page. Backoff starts at one second and doubles after each retry; a longer `Retry-After` delay (seconds or an HTTP date) is honored as a minimum wait. The estimate is in USD per hour and per 730-hour month for VM compute only; it excludes disk, IP, vault, and network charges. If no eligible SKU can be priced or any pricing batch or page remains unavailable, the script defaults to `Standard_B2ats_v2` only if it passes the same availability and compatibility checks, warns, and reports the estimate as unavailable. Otherwise, automatic selection stops. It never automatically selects D-series or another VM family. With an explicit SKU, an unavailable estimate produces a warning instead.
 
 1 GiB is a starting point for light personal use, not a throughput guarantee. If available memory runs low during updates or regular use, select a larger SKU with `VPN_VM_SIZE`. If a burstable VM regularly runs out of CPU credits, use a size with higher sustained CPU performance.
 
-Quota, regional capacity, subscription policy, and image availability can still reject deployment. Choose another region or set `VPN_VM_SIZE` explicitly; the script never retries deployment with a different SKU or region. Deploying the Bicep template directly bypasses automatic selection and keeps its `Standard_B1s` default.
+Quota, regional capacity, subscription policy, and image availability can still reject deployment. Choose another region or set `VPN_VM_SIZE` explicitly; the script never retries deployment with a different SKU or region. Deploying the Bicep template directly bypasses automatic selection and uses its `Standard_B2ats_v2` default.
 
 You can run the same deployment locally after signing into Azure:
 
