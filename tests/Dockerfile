@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     wireguard-tools strongswan-swanctl charon-systemd libstrongswan-standard-plugins \
     libcharon-extra-plugins openssl jq nftables netbase iproute2 iputils-ping ca-certificates \
